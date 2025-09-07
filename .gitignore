@@ -1,0 +1,7 @@
+build/
+
+dist/
+
+QualCommFlashTool.spec
+
+edl_config.json
