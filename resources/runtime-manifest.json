@@ -1,0 +1,10 @@
+{
+  "adb_version": "36.0.0-13206524",
+  "adb_sha256": "0e8bb380b1993eac9d2433a05d92a33035971cd25542b1c36b3537ddd6defe94",
+  "adb_source": "Android SDK platform-tools; user-installed official SDK copy",
+  "libusb_version": "1.0.29",
+  "libusb_source": "https://github.com/libusb/libusb/releases/download/v1.0.29/libusb-1.0.29.tar.bz2",
+  "libusb_source_sha256": "5977fc950f8d1395ccea9bd48c06b3f808fd3c2c961b44b0c2e6e29fc3a70a85",
+  "libusb_deployment_target": "13.0",
+  "python": "CPython 3.11.13 python-build-standalone (uv managed)"
+}
