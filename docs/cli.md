@@ -10,7 +10,7 @@ From a source checkout, run `scripts/flash.sh`. The launcher uses uv and the pin
 scripts/flash.sh "/Volumes/Firmware/DT50 package"
 ```
 
-Paths with spaces or Chinese characters are supported. Interactive input also accepts a quoted or shell-escaped path dragged from Finder. ZIP input is rejected. `scripts/flash.sh --help` and `--version` do not access devices. With project dependencies installed, `qft-flash` or `.app-venv/bin/python -m qft.cli` are equivalent entries.
+Paths with spaces or Chinese characters are supported. Press Tab in the folder prompt to complete directory names (press twice to list ambiguous matches). Interactive input also accepts a quoted or shell-escaped path dragged from Finder. ZIP input is rejected. `scripts/flash.sh --help` and `--version` do not access devices. With project dependencies installed, `qft-flash` or `.app-venv/bin/python -m qft.cli` are equivalent entries.
 
 First use installs Python dependencies through uv. Missing project ADB/libusb are prepared automatically using `scripts/prepare_resources.sh`, with output saved to `cli-bootstrap.log` in the application data directory. This requires network access and Xcode command-line tools; the system ADB is unchanged.
 

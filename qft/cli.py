@@ -20,6 +20,7 @@ from . import __version__
 from .models import PROTOCOL_VERSION, DeviceInfo, FlashPlan
 from .runtime import data_dir, root
 from .storage import Store, atomic_json
+from .path_input import read_folder
 
 
 class CLIError(Exception):
@@ -604,7 +605,7 @@ def main(argv=None):
         value = (
             args.folder
             if args.folder is not None
-            else input("Firmware folder: ").strip()
+            else read_folder().strip()
         )
         if not value:
             raise CLIError("No firmware folder selected")
