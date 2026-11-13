@@ -364,6 +364,7 @@ def advance():
         return
     name, callback = steps[index]
     index += 1
+    print(f"UI check {index}/{len(steps)}: {name}", flush=True)
     try:
         callback()
     except Exception as exc:

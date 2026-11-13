@@ -54,12 +54,15 @@ Settings, task records, full logs and inspection reports are stored in `~/Librar
 
 ## Build an internal installer
 
-Provide an official Android SDK `platform-tools` directory with ADB 36.0.0-13206524. The resource preparation script builds libusb 1.0.29 from its checksum-pinned release source for macOS 13; it requires Xcode command-line tools:
+Install uv and Xcode command-line tools, then run:
 
 ```sh
-QFT_ADB_SOURCE=/path/to/platform-tools scripts/prepare_resources.sh
 scripts/build.sh
 ```
+
+Missing or mismatched project resources are prepared automatically. The script downloads official Google Platform-Tools 36.0.0 for macOS and verifies both the archive and ADB executable against `resources/runtime-manifest.json`. It builds libusb 1.0.29 from its checksum-pinned source with a macOS 13 deployment target. The system/Homebrew ADB is never replaced or downgraded.
+
+For resource preparation alone, run `scripts/prepare_resources.sh`. An optional `QFT_ADB_SOURCE` override accepts a platform-tools directory or an `adb` file/symlink; the selected SDK must include `NOTICE.txt` and match the pinned executable checksum. Override validation occurs before libusb compilation. Omit/unset the override to use the automatic download.
 
 Build outputs: `dist/QualcommFlashTool.app`, `dist/QualcommFlashTool-2.3.2-arm64.dmg`, SHA-256 sidecar. The app includes Python, Qt, ADB, libusb and the EDL snapshot; users do not need Python or Homebrew. Resource binaries and generated build directories are not tracked. Dependency versions are locked by `uv.lock`; the EDL baseline has a separate SHA-256 manifest.
 

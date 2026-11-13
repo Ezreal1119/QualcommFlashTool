@@ -12,16 +12,13 @@ Compact, English-only Qualcomm flasher for **Apple Silicon · macOS 13+**.
 
 ## Build on another Mac
 
-Requires [uv](https://docs.astral.sh/uv/), Xcode command-line tools (`xcode-select --install`), and **Android Platform-Tools 36.0.0-13206524** containing `adb` and `NOTICE.txt`. Other ADB revisions fail the pinned checksum check.
-
-From the cloned project directory, replace the path below:
+Requires [uv](https://docs.astral.sh/uv/) and Xcode command-line tools (`xcode-select --install`). From the cloned project directory, run:
 
 ```sh
-QFT_ADB_SOURCE="/absolute/path/to/platform-tools" scripts/prepare_resources.sh
 scripts/build.sh
 ```
 
-The scripts prepare ADB/libusb, install the pinned Python/dependencies, run checks and produce **`dist/QualcommFlashTool.app` + `dist/*.dmg`**. Internet access is needed.
+The script automatically prepares the pinned ADB/libusb when missing, installs Python/dependencies, runs checks and produces **`dist/QualcommFlashTool.app` + `dist/*.dmg`**. Internet access is needed. Your system/Homebrew ADB is unchanged; no manual ADB path or downgrade is needed.
 
 ## Run from source
 

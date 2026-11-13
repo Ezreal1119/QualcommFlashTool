@@ -184,7 +184,8 @@ def test_qml_loads_pages_languages_and_themes(tmp_path):
         env=env,
         capture_output=True,
         text=True,
-        timeout=30,
+        # A fresh Qt environment can be slower than an already warmed checkout.
+        timeout=90,
     )
     assert result.returncode == 0, result.stderr
     assert "16 UI configurations and large-list rendering: OK" in result.stdout
