@@ -14,6 +14,7 @@ dev = ["pytest==8.4.2", "pyinstaller==6.16.0", "Pillow==11.3.0", "ruff==0.14.0"]
 
 [project.scripts]
 qualcomm-flash-tool = "qft.app:main"
+qft-flash = "qft.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["qft*"]

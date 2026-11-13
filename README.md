@@ -20,6 +20,16 @@ scripts/build.sh
 
 The script automatically prepares the pinned ADB/libusb when missing, installs Python/dependencies, runs checks and produces **`dist/QualcommFlashTool.app` + `dist/*.dmg`**. Internet access is needed. Your system/Homebrew ADB is unchanged; no manual ADB path or downgrade is needed.
 
+## Terminal version
+
+No desktop app update is needed. From the source checkout (uv required):
+
+```sh
+scripts/flash.sh
+```
+
+Enter an extracted firmware folder, review the detected device/files, then type **`FLASH`** to flash, verify and reboot. You can also pass the folder: `scripts/flash.sh "/path/to/firmware"`. First use prepares dependencies automatically; it needs internet and Xcode tools if ADB/libusb are missing. Quit the desktop app before using the terminal version. Errors stop execution with a nonzero exit code; Ctrl+C requests a safe stop. [CLI details](docs/cli.md).
+
 ## Run from source
 
 ```sh
