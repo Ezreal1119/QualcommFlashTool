@@ -1,19 +1,24 @@
 from __future__ import annotations
 import hashlib
+import os
+import time
 import re
 from pathlib import Path
 from defusedxml import ElementTree as ET
 from .models import FileStamp, Program, Patch, FlashPlan
 from .expressions import ValidationError, evaluate
 from .images import image_info, image_chunks
+from .patch_layout import validate_file_mirrors
 
 
-def stamp(path):
+def stamp(path, stopped=lambda: False):
     path = Path(path).resolve(strict=True)
     before = path.stat()
     digest = hashlib.sha256()
     with path.open("rb") as f:
         while data := f.read(4 * 1024 * 1024):
+            if stopped():
+                raise ValidationError("File check cancelled.")
             digest.update(data)
     after = path.stat()
     if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
@@ -27,14 +32,64 @@ def recheck(plan):
             raise ValidationError(f"File changed; run checks again: {saved.path}")
 
 
-def discover(folder):
+def discover(
+    folder,
+    *,
+    stopped=lambda: False,
+    progress=None,
+    max_entries=20000,
+    max_depth=6,
+    timeout=15,
+):
+    """Bounded streaming discovery. Never recursively walk an entire volume."""
     root = Path(folder).resolve(strict=True)
     if not root.is_dir():
         raise ValidationError("Select an extracted firmware folder")
-    # Files are found recursively; ambiguities are exposed, never guessed.
-    files = sorted(
-        (p for p in root.rglob("*") if p.is_file()), key=lambda p: str(p).lower()
-    )
+    if root == Path.home() or os.path.ismount(root):
+        raise ValidationError(
+            "Select the firmware folder, not an entire disk or your home folder."
+        )
+    started = time.monotonic()
+    count = 0
+    files = []
+    pending = [(root, 0)]
+    while pending:
+        if stopped():
+            raise ValidationError("Folder scan cancelled.")
+        directory, depth = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if stopped():
+                        raise ValidationError("Folder scan cancelled.")
+                    count += 1
+                    if count > max_entries or time.monotonic() - started > timeout:
+                        raise ValidationError(
+                            "Folder is too large to scan. Select the specific firmware folder instead."
+                        )
+                    if progress and (count == 1 or count % 100 == 0):
+                        progress({"entries": count, "path": str(directory)})
+                    if (
+                        entry.name.startswith(".")
+                        or entry.name == "__MACOSX"
+                        or entry.is_symlink()
+                    ):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        if depth >= max_depth:
+                            raise ValidationError(
+                                "Folder nesting is too deep. Select the folder containing the firmware XML files."
+                            )
+                        pending.append((Path(entry.path), depth + 1))
+                    elif entry.is_file(follow_symlinks=False):
+                        name = entry.name.lower()
+                        if name.endswith((".xml", ".elf", ".mbn")):
+                            files.append(Path(entry.path))
+        except PermissionError as exc:
+            raise ValidationError(
+                f"Cannot read {directory}. Choose a firmware folder you can access."
+            ) from exc
+    files.sort(key=lambda p: str(p).lower())
     raws = [
         p
         for p in files
@@ -77,15 +132,16 @@ def _integer(element, name, default=None):
 
 def _xml(path, tag):
     root = ET.parse(path).getroot()
-    if root.tag != "data":
-        raise ValidationError(f"Expected <data> XML root: {path}")
+    allowed = ("data", "patches") if tag == "patch" else ("data",)
+    if root.tag not in allowed:
+        raise ValidationError(f"Unexpected <{root.tag}> XML root: {path}")
     for elem in root:
         if elem.tag != tag:
             raise ValidationError(f"Unsupported XML operation <{elem.tag}> in {path}")
         yield elem
 
 
-def make_plan(folder, loader, memory, raws, patches):
+def make_plan(folder, loader, memory, raws, patches, *, stopped=lambda: False):
     if memory not in ("ufs", "emmc"):
         raise ValidationError("Select UFS or eMMC")
     root = Path(folder).resolve(strict=True)
@@ -110,11 +166,14 @@ def make_plan(folder, loader, memory, raws, patches):
         raise ValidationError("Missing or mismatched rawprogram/patch indices")
     programs = []
     patch_ops = []
+    file_patches = []
     used = {
         str(loader),
         *[str(Path(p).resolve(strict=True)) for p in [*raws, *patches]],
     }
     for xml in raws:
+        if stopped():
+            raise ValidationError("File check cancelled.")
         xml = Path(xml).resolve(strict=True)
         for e in _xml(xml, "program"):
             name = e.get("filename", "").strip()
@@ -149,44 +208,55 @@ def make_plan(folder, loader, memory, raws, patches):
                 raise ValidationError(
                     "Per-image readbackverify is unsupported; default critical-area verification is separate"
                 )
-            if e.get("partofsingleimage", "false").lower() not in ("false", "0"):
-                raise ValidationError("Single-image layouts are unsupported")
+            if e.get("partofsingleimage", "false").lower() not in (
+                "false",
+                "0",
+                "true",
+                "1",
+            ):
+                raise ValidationError("Invalid partofsingleimage flag")
             ss = _integer(e, "SECTOR_SIZE_IN_BYTES")
             count = _integer(e, "num_partition_sectors")
             offset = _integer(e, "file_sector_offset", "0") * ss
-            if ss not in (512, 4096) or count == 0:
-                raise ValidationError("Invalid sector size or empty write")
+            if ss not in (512, 4096):
+                raise ValidationError("Invalid sector size")
             start = e.get("start_sector", "")
             evaluate(start)
             if "CRC32" in start:
                 raise ValidationError("CRC32 is only allowed in patch values")
             expanded, sparse = image_info(image)
-            if offset >= expanded or count * ss > expanded - offset + ss - 1:
-                raise ValidationError(f"Image range exceeds file: {name}")
+            if offset >= expanded:
+                raise ValidationError(f"Image offset exceeds file: {name}")
+            available_sectors = (expanded - offset + ss - 1) // ss
+            # XML count is an upper bound; zero means derive from the file.
+            # Only the last physical sector is padded, never the whole partition.
+            actual_sectors = (
+                min(count, available_sectors) if count else available_sectors
+            )
             if sparse:
                 for _ in image_chunks(image):
-                    pass
+                    if stopped():
+                        raise ValidationError("File check cancelled.")
             programs.append(
                 Program(
                     str(image),
                     e.get("label", image.stem),
                     _integer(e, "physical_partition_number"),
                     start,
-                    count,
+                    actual_sectors,
                     ss,
                     offset,
                     expanded,
                     sparse,
+                    count,
                 )
             )
             used.add(str(image))
     for xml in patches:
+        local_disk, local_host = [], []
         for e in _xml(xml, "patch"):
-            # Host-file patches must not be silently skipped.
-            if e.get("filename") != "DISK":
-                raise ValidationError(
-                    "Only DISK patch targets are supported; host-file patches require a prepared package"
-                )
+            if stopped():
+                raise ValidationError("File check cancelled.")
             unsupported = set(e.attrib) - {
                 "SECTOR_SIZE_IN_BYTES",
                 "byte_offset",
@@ -204,8 +274,7 @@ def make_plan(folder, loader, memory, raws, patches):
             ss = _integer(e, "SECTOR_SIZE_IN_BYTES")
             size = _integer(e, "size_in_bytes")
             byte = _integer(e, "byte_offset")
-            start = e.get("start_sector", "")
-            value = e.get("value", "")
+            start, value = e.get("start_sector", ""), e.get("value", "")
             evaluate(start)
             evaluate(value)
             if (
@@ -215,17 +284,32 @@ def make_plan(folder, loader, memory, raws, patches):
                 or "CRC32" in start
             ):
                 raise ValidationError("Unsupported patch range")
-            patch_ops.append(
-                Patch(
-                    _integer(e, "physical_partition_number"),
-                    start,
-                    byte,
-                    size,
-                    value,
-                    ss,
-                    e.get("what", ""),
+            target = e.get("filename", "")
+            if target != "DISK":
+                if not target:
+                    raise ValidationError("Patch filename is missing")
+                target = str(
+                    (Path(xml).parent / target.replace("\\", "/")).resolve(strict=True)
                 )
+                try:
+                    Path(target).relative_to(root)
+                except ValueError:
+                    raise ValidationError("Host patch escapes package folder")
+                used.add(target)
+            op = Patch(
+                _integer(e, "physical_partition_number"),
+                start,
+                byte,
+                size,
+                value,
+                ss,
+                e.get("what", ""),
+                target,
             )
+            (local_disk if target == "DISK" else local_host).append(op)
+        validate_file_mirrors(programs, local_disk, local_host)
+        patch_ops.extend(local_disk)
+        file_patches.extend(local_host)
     if not programs:
         raise ValidationError("Package contains no image writes")
     if len({p.sector_size for p in [*programs, *patch_ops]}) != 1:
@@ -238,15 +322,16 @@ def make_plan(folder, loader, memory, raws, patches):
         memory,
         tuple(programs),
         tuple(patch_ops),
-        tuple(stamp(p) for p in sorted(used)),
+        tuple(stamp(p, stopped=stopped) for p in sorted(used)),
         tuple(str(Path(p).resolve()) for p in raws),
         tuple(str(Path(p).resolve()) for p in patches),
+        tuple(file_patches),
     )
 
 
 def validate_ranges(plan, capacities):
     errors = []
-    warnings = []
+    warnings = layout_notes(plan)
     seen = {}
     if (
         len(
@@ -266,8 +351,13 @@ def validate_ranges(plan, capacities):
             continue
         start = evaluate(op.start, capacity)
         count = op.sectors if isinstance(op, Program) else 1
-        if start < 0 or start + count > capacity:
-            errors.append(f"Write outside LUN {op.lun}: sector {start}, length {count}")
+        limit_count = (
+            (op.declared_sectors or op.sectors) if isinstance(op, Program) else count
+        )
+        if start < 0 or start + limit_count > capacity:
+            errors.append(
+                f"Write or XML allocation outside LUN {op.lun}: sector {start}, length {limit_count}"
+            )
         if isinstance(op, Program):
             for old_start, old_end, label in seen.get(op.lun, []):
                 if start < old_end and start + count > old_start:
@@ -280,3 +370,26 @@ def validate_ranges(plan, capacities):
             if "CRC32" not in op.value and not 0 <= value < 2 ** (8 * op.size):
                 errors.append("Patch value does not fit its declared size")
     return errors, warnings
+
+
+def layout_notes(plan):
+    short = [
+        p
+        for p in plan.programs
+        if p.declared_sectors and p.sectors < p.declared_sectors
+    ]
+    auto = [p for p in plan.programs if p.declared_sectors == 0]
+    notes = []
+    if short:
+        notes.append(
+            f"{len(short)} image writes are shorter than their XML allocation; only image data and final-sector padding are written. Remaining allocation is unchanged."
+        )
+    if auto:
+        notes.append(
+            f"{len(auto)} zero-count entries use the image length; no whole-partition erase or fill is performed."
+        )
+    if plan.file_patches:
+        notes.append(
+            f"{len(plan.file_patches)} host-file patches have equivalent ordered DISK patches. Only the DISK operations are sent; source images are unchanged."
+        )
+    return notes

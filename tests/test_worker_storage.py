@@ -24,7 +24,7 @@ def test_worker_version_rejection():
 
 def test_worker_discovery_and_validation(package):
     events = worker({"version": 1, "action": "discover", "folder": str(package)})
-    assert events[0]["kind"] == "package"
+    assert any(e["kind"] == "package" for e in events)
     result = worker(
         {
             "version": 1,
@@ -59,9 +59,12 @@ def test_storage_crash_recovery_and_export(tmp_path, monkeypatch):
 def test_settings_persist(tmp_path, monkeypatch):
     monkeypatch.setenv("QFT_DATA_DIR", str(tmp_path))
     store = Store()
-    store.settings["language"] = "zh"
+    store.settings.update(language="zh", theme="dark", last_folder="/Firmware/固件")
     store.save_settings()
-    assert Store().settings["language"] == "zh"
+    restored = Store()
+    assert restored.settings["language"] == "en"
+    assert restored.settings["theme"] == "dark"
+    assert restored.settings["last_folder"] == "/Firmware/固件"
 
 
 def test_unknown_action_cannot_fall_through_to_flashing():

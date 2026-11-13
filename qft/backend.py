@@ -7,10 +7,12 @@ not called. Every transfer requires initial AND final ACK. No automatic reset.
 import json
 import logging
 import re
+import time
 from xml.sax.saxutils import quoteattr
 from .runtime import setup_vendor
 from .expressions import ValidationError
 from .devices import scan
+from .transport import CheckedUSB
 
 
 class EDLBackend:
@@ -55,33 +57,9 @@ class EDLBackend:
             raise ValidationError(
                 "Cannot open EDL device. Check USB access permissions and other running tools."
             )
-        old_read = self.cdc.read
-
-        def checked_write(data, *args, **kwargs):
-            # Upstream transport retries and ignores short transfers. Never retry
-            # raw writes: their device-side completion is unknown after failure.
-            data = data.encode() if isinstance(data, str) else data
-            length = len(data)
-            sent = 0
-            if not length:
-                self.cdc.EP_OUT.write(b"", timeout=1500)
-            while sent < length:
-                packet = data[sent : sent + 1048576]
-                count = self.cdc.EP_OUT.write(packet, timeout=1500)
-                if count != len(packet):
-                    raise IOError("Short USB write; no retry was attempted")
-                sent += count
-                self.activity()
-            return True
-
-        def checked_read(*args, **kwargs):
-            data = old_read(*args, **kwargs)
-            if data:
-                self.activity()
-            return data
-
-        self.cdc.write = checked_write
-        self.cdc.read = checked_read
+        transport = CheckedUSB(self.cdc, self.activity)
+        self.cdc.write = transport.write
+        self.cdc.read = transport.read
         sah = sahara(self.cdc, logging.INFO)
         sah.programmer = self.plan.loader
         info = sah.connect()
@@ -122,15 +100,18 @@ class EDLBackend:
             {},
         )
         self.cdc.timeout = 1000
-        # Drain initial loader greeting without loading shared edl_config.json.
-        greeting = bytearray()
-        for _ in range(4):
-            data = self.cdc.read(timeout=100)
-            if not data:
-                break
-            greeting += data
-        self.supports_digest = b"getsha256digest" in greeting.lower()
-        self.emit("log", {"text": greeting.decode("utf-8", errors="replace")})
+        greeting = self._drain_greeting()
+        # An existing Firehose session may have no startup output left. NOP
+        # advertises capabilities again and establishes a complete ACK boundary.
+        rsp = self._connect_command("nop", {})
+        self.require(rsp, "Firehose handshake")
+        for line in rsp.log or []:
+            self.emit("log", {"text": str(line) + "\n"})
+        capabilities = (
+            greeting.lower()
+            + " ".join(str(line) for line in rsp.log or []).lower().encode()
+        )
+        self.supports_digest = b"getsha256digest" in capabilities
         attrs = {
             "MemoryName": self.plan.memory,
             "Verbose": 0,
@@ -140,7 +121,7 @@ class EDLBackend:
             "SkipWrite": 0,
         }
         for attempt in range(2):
-            rsp = self.fh.xmlsend(self.xml("configure", attrs))
+            rsp = self._connect_command("configure", attrs)
             raw = self._response_fields(rsp)
             if self.acked(rsp):
                 break
@@ -168,8 +149,8 @@ class EDLBackend:
             raise ValidationError("Invalid negotiated transfer size")
         cfg.MaxPayloadSizeToTargetInBytes = payload
         for lun in sorted({p.lun for p in [*self.plan.programs, *self.plan.patches]}):
-            rsp = self.fh.xmlsend(
-                self.xml("getstorageinfo", {"physical_partition_number": lun})
+            rsp = self._connect_command(
+                "getstorageinfo", {"physical_partition_number": lun}
             )
             self.require(rsp, "storage information")
             fields = self._storage_fields(rsp)
@@ -180,6 +161,35 @@ class EDLBackend:
                 raise ValidationError(f"LUN {lun} reported a conflicting memory type")
             self.capacities[lun] = self.geometry(fields, lun, cfg.SECTOR_SIZE_IN_BYTES)
         return self.capacities
+
+    def _drain_greeting(self):
+        """Finish all loader startup packets before sending another command."""
+        greeting = bytearray()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            data = self.cdc.read(length=1048576, timeout=150)
+            if not data:
+                text = greeting.lower()
+                if (
+                    b"supported functions" in text
+                    and b"end of supported functions" not in text
+                ):
+                    continue
+                self.emit("log", {"text": greeting.decode("utf-8", errors="replace")})
+                return bytes(greeting)
+            greeting += data
+            if len(greeting) > 4 * 1048576:
+                break
+        raise TimeoutError(
+            "Firehose startup messages did not settle; no firmware write was started"
+        )
+
+    def _connect_command(self, name, attrs):
+        self.emit("connection", {"step": name, **attrs})
+        try:
+            return self.fh.xmlsend(self.xml(name, attrs))
+        except Exception as exc:
+            raise IOError(f"Firehose {name} failed: {exc}") from exc
 
     @classmethod
     def geometry(cls, fields, lun, sector_size):
@@ -383,7 +393,47 @@ class EDLBackend:
         )
 
     def reset(self):
-        self.require(self.fh.xmlsend(self.xml("power", {"value": "reset"})), "reset")
+        rsp = self.fh.xmlsend(self.xml("power", {"value": "reset"}))
+        self.require(rsp, "reset")
+        for line in rsp.log or []:
+            self.emit("log", {"text": str(line) + "\n"})
+        # Some programmers block reset until the host consumes the logs sent
+        # after ACK. Keep receiving until USB disappearance is observed.
+        deadline = time.monotonic() + 15
+        read_failed = False
+        while time.monotonic() < deadline:
+            if not read_failed:
+                try:
+                    data = self.cdc.read(length=1048576, timeout=150)
+                    if data:
+                        self.emit(
+                            "log", {"text": data.decode("utf-8", errors="replace")}
+                        )
+                except IOError as exc:
+                    read_failed = True
+                    self.emit("log", {"text": f"USB changed after reset ACK: {exc}\n"})
+            report = scan()
+            usb_errors = [
+                error for error in report["errors"] if error.startswith("USB:")
+            ]
+            remaining = [
+                device
+                for device in report["devices"]
+                if device["mode"] == "edl"
+                and (
+                    device.get("usb_path") == self.device.usb_path
+                    if self.device.usb_path
+                    else (device["bus"], device["address"])
+                    == (self.device.bus, self.device.address)
+                )
+            ]
+            if not remaining and not usb_errors:
+                self.emit("connection", {"step": "reset_disconnected"})
+                return
+            time.sleep(0.15)
+        raise IOError(
+            "Reset acknowledged but EDL did not disconnect within 15 seconds; no reset retry was attempted"
+        )
 
     def close(self):
         if self.cdc:

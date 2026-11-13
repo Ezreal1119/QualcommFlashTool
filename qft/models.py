@@ -16,6 +16,7 @@ class DeviceInfo:
     address: int = 0
     vid: int = 0x05C6
     pid: int = 0x9008
+    usb_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class Program:
     file_offset: int
     expanded_size: int
     sparse: bool = False
+    declared_sectors: int | None = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,7 @@ class Patch:
     value: str
     sector_size: int
     description: str = ""
+    target: str = "DISK"
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,7 @@ class FlashPlan:
     files: tuple[FileStamp, ...]
     raw_files: tuple[str, ...]
     patch_files: tuple[str, ...]
+    file_patches: tuple[Patch, ...] = ()
 
     @classmethod
     def from_dict(cls, d):
@@ -68,6 +72,7 @@ class FlashPlan:
                 **d,
                 "programs": tuple(Program(**p) for p in d["programs"]),
                 "patches": tuple(Patch(**p) for p in d["patches"]),
+                "file_patches": tuple(Patch(**p) for p in d.get("file_patches", [])),
                 "files": tuple(FileStamp(**p) for p in d["files"]),
                 "raw_files": tuple(d["raw_files"]),
                 "patch_files": tuple(d["patch_files"]),

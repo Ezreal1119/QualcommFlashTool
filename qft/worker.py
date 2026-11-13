@@ -4,6 +4,7 @@ import logging
 import sys
 import threading
 from dataclasses import asdict
+from pathlib import Path
 from .models import PROTOCOL_VERSION, DeviceInfo, FlashPlan
 from .runtime import setup_vendor
 
@@ -45,21 +46,64 @@ def main():
             if action == "environment":
                 from .devices import environment
 
-                emit("environment", {"checks": environment()})
-                result = {
-                    "status": "success",
-                    "message": "Runtime checks complete. Connect a device and import an extracted firmware folder.",
-                }
-            elif action == "scan":
-                from .devices import scan, environment
+                from .devices import scan, connection_message
 
-                emit("devices", scan())
                 emit("environment", {"checks": environment()})
-                result = {"status": "success", "message": "Device list refreshed."}
+                report = scan()
+                emit("devices", report)
+                result = {"status": "success", "message": connection_message(report)}
+            elif action == "scan":
+                from .devices import scan, environment, connection_message
+
+                report = scan()
+                emit("devices", report)
+                emit("environment", {"checks": environment()})
+                result = {"status": "success", "message": connection_message(report)}
+            elif action == "prepare":
+                from .firmware import import_firmware, automatic_configuration
+                from .package import make_plan
+
+                if not Path(request["source"]).is_dir():
+                    raise ValueError(
+                        "Only extracted firmware folders are accepted. ZIP import is disabled."
+                    )
+                folder = import_firmware(request["source"], emit, stopped.is_set)
+                config = automatic_configuration(
+                    folder,
+                    stopped=stopped.is_set,
+                    progress=lambda data: emit("scan_progress", data),
+                )
+                emit("package", config)
+                if config["issues"]:
+                    result = {
+                        "status": "attention",
+                        "message": "Some package choices need your review. Open Advanced configuration.",
+                    }
+                else:
+                    plan = make_plan(
+                        folder,
+                        config["loader"],
+                        config["memoryHint"],
+                        config["selectedRaws"],
+                        config["selectedPatches"],
+                        stopped=stopped.is_set,
+                    )
+                    emit("plan", asdict(plan))
+                    result = {
+                        "status": "ready",
+                        "message": "Package files checked. Checking the connected device next.",
+                    }
             elif action == "discover":
                 from .package import discover
 
-                emit("package", discover(request["folder"]))
+                emit(
+                    "package",
+                    discover(
+                        request["folder"],
+                        stopped=stopped.is_set,
+                        progress=lambda data: emit("scan_progress", data),
+                    ),
+                )
                 result = {
                     "status": "success",
                     "message": "Package candidates loaded. Select XML variants and loader, then validate.",
@@ -67,18 +111,41 @@ def main():
             elif action == "validate":
                 from .package import make_plan
 
+                memory = request["memory"]
+                if request.get("memory_source") == "auto":
+                    from .firmware import infer_memory
+
+                    memory = infer_memory(request["raws"])
+                    if not memory:
+                        raise ValueError(
+                            "Storage type cannot be inferred. Choose it in Advanced configuration."
+                        )
                 plan = make_plan(
                     request["folder"],
                     request["loader"],
-                    request["memory"],
+                    memory,
                     request["raws"],
                     request["patches"],
+                    stopped=stopped.is_set,
                 )
                 emit("plan", asdict(plan))
                 result = {
                     "status": "ready",
                     "message": "Package files validated. Inspect the selected EDL device next.",
                 }
+            elif action == "one_click":
+                from .workflow import execute_one_click
+
+                result = asdict(
+                    execute_one_click(
+                        FlashPlan.from_dict(request["plan"]),
+                        DeviceInfo(**request["device"]),
+                        emit,
+                        stopped.is_set,
+                        reboot=request.get("reboot", True),
+                        expected_capacities=request.get("capacities"),
+                    )
+                )
             elif action == "enter_edl":
                 from .devices import enter_edl
 

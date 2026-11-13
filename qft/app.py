@@ -14,7 +14,7 @@ def main():
     parser.add_argument("--screenshot")
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
-    from PySide6.QtCore import QUrl, QTimer, QLockFile
+    from PySide6.QtCore import QUrl, QTimer, QLockFile, QLocale
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
     from PySide6.QtQml import QQmlApplicationEngine
@@ -22,10 +22,11 @@ def main():
     from .controller import Controller
     from .runtime import root, data_dir
 
+    QLocale.setDefault(QLocale(QLocale.English, QLocale.UnitedStates))
     app = QApplication(sys.argv)
     app.setOrganizationName("Patrick Xu")
     app.setApplicationName("Qualcomm Flash Tool")
-    app.setApplicationVersion("2.0.0")
+    app.setApplicationVersion("2.3.2")
     app.setWindowIcon(QIcon(str(root() / "qualcomm_icon.icns")))
     lock = QLockFile(str(data_dir() / "application.lock"))
     if not lock.tryLock(0):
@@ -43,6 +44,7 @@ def main():
     if not engine.rootObjects():
         raise SystemExit("QML could not be loaded")
     app.aboutToQuit.connect(controller.close)
+    controller.quitRequested.connect(app.quit)
     if args.screenshot:
         window = engine.rootObjects()[0]
 

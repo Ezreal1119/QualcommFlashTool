@@ -149,6 +149,9 @@ def execute(
                 "vbmeta",
                 "vbmeta_a",
                 "vbmeta_b",
+                "vbmeta_system",
+                "vbmeta_system_a",
+                "vbmeta_system_b",
             ):
                 continue
             boundary()

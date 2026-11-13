@@ -118,6 +118,8 @@ def test_controller_worker_roundtrip(app, tmp_path, monkeypatch, package):
 
     monkeypatch.setenv("QFT_DATA_DIR", str(tmp_path / "appdata"))
     c = Controller()
+    # Keep this integration test offline; device orchestration is simulated separately.
+    monkeypatch.setattr(c, "_continue_auto", lambda action: None)
 
     def wait():
         deadline = time.monotonic() + 15

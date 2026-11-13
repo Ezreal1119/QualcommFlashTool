@@ -13,23 +13,27 @@ from PySide6.QtCore import (
     QUrl,
 )
 from PySide6.QtWidgets import QFileDialog
+from PySide6.QtGui import QDesktopServices
 from .models import PROTOCOL_VERSION
 from .runtime import root
 from .storage import Store, atomic_json
 
-BUSY_STATES = {
-    "checking",
-    "connecting",
-    "flashing",
-    "patching",
-    "verifying",
-    "rebooting",
-    "stopping",
+CANCELLABLE_ACTIONS = {
+    "environment",
+    "prepare",
+    "discover",
+    "validate",
+    "scan",
+    "inspect",
 }
+PROTECTED_ACTIONS = {"flash", "reset", "enter_edl", "one_click"}
 
 
 class Controller(QObject):
     changed = Signal()
+    editorRequested = Signal()
+    folderConfirmationRequested = Signal()
+    quitRequested = Signal()
 
     def __init__(self, demo=False):
         super().__init__()
@@ -43,8 +47,32 @@ class Controller(QObject):
         self.result = None
         self.action = ""
         self.task_dir = None
+        self._auto_check = False
+        self._generation = 0
+        self._cancel_requested = False
+        self._inspected_device = None
+        self._editing_hash = None
+        self._pending_source = None
+        self._quit_requested = False
+        self._import_workspace = None
         self._data = {
             "page": 0,
+            "advanced": False,
+            "packageStatus": "waiting",
+            "deviceStatus": "waiting",
+            "packageIssues": [],
+            "packageSource": "",
+            "folderToConfirm": "",
+            "memorySource": "auto",
+            "canFlash": False,
+            "canStart": False,
+            "deviceNotice": "missing",
+            "canCancelNow": False,
+            "canChoosePackage": True,
+            "closeBlocked": False,
+            "editorPath": "",
+            "editorText": "",
+            "editorError": "",
             "busy": False,
             "state": "idle",
             "message": "Connect a device and choose an extracted firmware folder.",
@@ -61,6 +89,7 @@ class Controller(QObject):
             "plan": {},
             "capacities": {},
             "warnings": [],
+            "layoutNotes": [],
             "environment": [],
             "logs": "",
             "progress": 0.0,
@@ -73,6 +102,7 @@ class Controller(QObject):
             "history": self.store.history(),
             "demo": demo,
             **self.store.settings,
+            "reboot": True,
         }
         # A remembered folder is displayed, but never trusted as a validated plan.
         self._data["folder"] = ""
@@ -91,13 +121,68 @@ class Controller(QObject):
 
     def update(self, **values):
         self._data.update(values)
+        self._data["canCancelNow"] = bool(
+            self._data["busy"] and self.action in CANCELLABLE_ACTIONS
+        )
+        self._data["canChoosePackage"] = not self._quit_requested and (
+            not self._data["busy"] or self._data["canCancelNow"]
+        )
+        self._data["closeBlocked"] = bool(
+            self._data["busy"] and self.action in PROTECTED_ACTIONS
+        )
+        device = self.device()
+        self._data["canFlash"] = bool(
+            not self._data["busy"]
+            and self._data["plan"]
+            and self._data["capacities"]
+            and device
+            and device["mode"] == "edl"
+            and device["id"] == self._inspected_device
+            and not self._data["editorPath"]
+        )
+        if device is None:
+            notice = "choose" if self._data["devices"] else "missing"
+        elif device["mode"] == "edl":
+            notice = "edl_ready"
+        elif device["status"] == "unauthorized":
+            notice = "unauthorized"
+        elif device["status"] == "offline":
+            notice = "offline"
+        elif device["status"] == "device":
+            notice = "adb_ready" if device.get("usb_path") else "usb_identity_missing"
+        else:
+            notice = "unavailable"
+        self._data["deviceNotice"] = notice
+        self._data["canStart"] = bool(
+            not self._data["busy"]
+            and self._data["packageStatus"] == "passed"
+            and self._data["plan"]
+            and device
+            and not self._data["editorPath"]
+            and not self._data["folderToConfirm"]
+            and (
+                self._data["canFlash"]
+                or (
+                    device["mode"] == "adb"
+                    and device["status"] == "device"
+                    and device.get("usb_path")
+                )
+            )
+        )
         self.changed.emit()
 
     def invalidate(self):
+        self._generation += 1
+        self._auto_check = False
+        self._inspected_device = None
         self.update(
+            packageStatus="changed",
+            deviceStatus="waiting",
+            packageIssues=[],
             plan={},
             capacities={},
             warnings=[],
+            layoutNotes=[],
             result={},
             state="idle",
             progressKnown=False,
@@ -115,18 +200,32 @@ class Controller(QObject):
     def option(self, key, value):
         if not self.editable():
             return
-        if key in ("language", "theme", "reboot"):
+        if key == "advanced":
+            self.update(advanced=bool(value))
+        elif key in ("theme", "reboot"):
             self.store.settings[key] = value
             self.store.save_settings()
             self.update(**{key: value})
         elif key == "memory" and value in ("ufs", "emmc"):
             self.invalidate()
-            self.update(memory=value)
+            self.update(
+                memory=value,
+                memorySource="manual",
+                message="Configuration changed. Run Check again before flashing.",
+            )
 
     @Slot(int)
     def selectDevice(self, index):
         if self.editable():
-            self.update(deviceIndex=index, capacities={}, result={})
+            if not -1 <= index < len(self._data["devices"]):
+                return
+            self._inspected_device = None
+            self.update(
+                deviceIndex=index, capacities={}, result={}, deviceStatus="waiting"
+            )
+            if self._data["plan"] and index >= 0:
+                self._auto_check = True
+                self._continue_auto("scan")
 
     @Slot(str)
     def selectLoader(self, path):
@@ -152,28 +251,67 @@ class Controller(QObject):
 
     @Slot()
     def chooseFolder(self):
-        if not self.editable():
+        if not self._data["canChoosePackage"]:
             return
+        if self.proc:
+            self.stop()
         folder = QFileDialog.getExistingDirectory(
             None,
             "Choose extracted firmware",
             self.store.settings.get("last_folder", ""),
         )
         if folder:
-            self.loadFolder(folder)
+            self.requestFolder(folder)
 
     @Slot(str)
     def dropFolder(self, url):
-        if self.editable():
-            self.loadFolder(QUrl(url).toLocalFile())
+        if self._data["canChoosePackage"]:
+            self.requestFolder(QUrl(url).toLocalFile())
+
+    def requestFolder(self, folder):
+        if not self._data["canChoosePackage"]:
+            return
+        path = Path(folder)
+        if not path.is_dir():
+            self.update(
+                message="Only extracted firmware folders are accepted. ZIP files cannot be selected."
+            )
+            return
+        self.update(folderToConfirm=str(path.resolve()))
+        self.folderConfirmationRequested.emit()
+
+    @Slot()
+    def confirmFolder(self):
+        folder = self._data["folderToConfirm"]
+        self.update(folderToConfirm="")
+        if folder:
+            self.loadFolder(folder)
+
+    @Slot()
+    def cancelFolderSelection(self):
+        self.update(folderToConfirm="")
 
     @Slot(str)
     def loadFolder(self, folder):
-        if not self.editable():
+        if not self._data["canChoosePackage"]:
+            return
+        if not Path(folder).is_dir():
+            self.update(
+                message="Select an extracted firmware folder. ZIP import is disabled."
+            )
+            return
+        if self.proc:
+            self._pending_source = folder
+            self.stop()
             return
         self.invalidate()
+        self._auto_check = True
         self.update(
-            folder=folder,
+            packageSource=folder,
+            packageStatus="checking",
+            deviceStatus="waiting",
+            advanced=False,
+            folder=folder if Path(folder).is_dir() else "",
             loaders=[],
             loader="",
             raws=[],
@@ -181,9 +319,11 @@ class Controller(QObject):
             selectedRaws=[],
             selectedPatches=[],
         )
-        self.store.settings["last_folder"] = folder
+        self.store.settings["last_folder"] = str(
+            Path(folder) if Path(folder).is_dir() else Path(folder).parent
+        )
         self.store.save_settings()
-        self.launch("discover", {"folder": folder})
+        self.launch("prepare", {"source": folder})
 
     @Slot(str)
     def chooseFiles(self, kind):
@@ -217,6 +357,8 @@ class Controller(QObject):
     @Slot()
     def refresh(self):
         if self.editable():
+            self._auto_check = bool(self._data["plan"])
+            self.update(deviceStatus="checking")
             self.launch("scan", {})
 
     def device(self):
@@ -236,6 +378,8 @@ class Controller(QObject):
         if not self.editable():
             return
         self.invalidate()
+        self._auto_check = True
+        self.update(packageStatus="checking")
         self.launch(
             "validate",
             {
@@ -244,6 +388,7 @@ class Controller(QObject):
                     ("folder", "folder"),
                     ("loader", "loader"),
                     ("memory", "memory"),
+                    ("memory_source", "memorySource"),
                     ("raws", "selectedRaws"),
                     ("patches", "selectedPatches"),
                 ]
@@ -259,7 +404,7 @@ class Controller(QObject):
         if not dev or dev["mode"] != "edl" or not plan:
             self.update(message="Validate a package and select an EDL device first.")
             return
-        if action == "flash" and not self._data["capacities"]:
+        if action == "flash" and not self._data["canFlash"]:
             self.update(message="Inspect the device before flashing.")
             return
         self.launch(
@@ -272,10 +417,31 @@ class Controller(QObject):
             },
         )
 
+    @Slot()
+    def startFlash(self):
+        """Only called after the user confirms the target and complete workflow."""
+        if not self._data["canStart"]:
+            self.update(
+                message="Connect an authorized USB device, select it, and validate the firmware before starting."
+            )
+            return
+        self._auto_check = False
+        self.launch(
+            "one_click",
+            {
+                "device": self.device(),
+                "plan": self._data["plan"],
+                "reboot": True,
+                "capacities": self._data["capacities"],
+            },
+        )
+
     def launch(self, action, payload):
         if self.proc or self._data["demo"]:
             return
         self.action = action
+        self._cancel_requested = False
+        self._import_workspace = None
         self.result = None
         self.buffer = b""
         self.started = self.activity = self.phase_started = time.monotonic()
@@ -362,10 +528,35 @@ class Controller(QObject):
                 return
 
     def handle(self, kind, data):
+        if kind == "import_workspace":
+            self._import_workspace = data["path"]
+            return
+        if self._cancel_requested and self.action in CANCELLABLE_ACTIONS:
+            return  # Discard late package/plan/results from the cancelled worker.
+        if kind == "scan_progress":
+            self.activity = time.monotonic()
+            self.update(
+                message=f"Scanning firmware folder… {data['entries']} entries checked.",
+                currentFile=data["path"],
+            )
+            return
         if kind in ("activity", "progress"):
             self.activity = time.monotonic()
-        if kind == "stage":
+        if kind == "connection":
+            detail = (
+                f" · LUN {data['physical_partition_number']}"
+                if "physical_partition_number" in data
+                else ""
+            )
+            self.log(f"[{time.strftime('%H:%M:%S')}] USB · {data['step']}{detail}\n")
+        elif kind == "stage":
             self.phase_started = self.activity = time.monotonic()
+            detail = data.get("label") or data.get("file", "")
+            self.log(
+                f"[{time.strftime('%H:%M:%S')}] {data['state'].upper()}"
+                + (f" · {detail}" if detail else "")
+                + "\n"
+            )
             self.update(
                 state=data["state"],
                 currentFile=data.get("label") or data.get("file", ""),
@@ -380,41 +571,83 @@ class Controller(QObject):
             )
         elif kind == "log":
             self.log(data.get("text", ""))
-        elif kind == "devices":
+        elif kind == "device_bound":
+            device = data["device"]
+            self._inspected_device = None
             self.update(
-                devices=data["devices"],
-                deviceIndex=-1,
+                devices=[device], deviceIndex=0, capacities={}, deviceStatus="checking"
+            )
+            if self.task_dir:
+                atomic_json(self.task_dir / "device-binding.json", data)
+        elif kind == "devices":
+            previous = self.device()
+            devices = data["devices"]
+            edl = [i for i, d in enumerate(devices) if d["mode"] == "edl"]
+            selected = -1
+            if previous:
+                selected = next(
+                    (i for i, d in enumerate(devices) if d["id"] == previous["id"]), -1
+                )
+            if selected < 0 and len(edl) == 1:
+                selected = edl[0]
+            if selected < 0 and not edl and len(devices) == 1:
+                selected = 0
+            self._inspected_device = None
+            self.update(
+                devices=devices,
+                deviceIndex=selected,
                 capacities={},
+                deviceStatus="waiting",
                 warnings=data["errors"],
             )
         elif kind == "environment":
             self.update(environment=data["checks"])
         elif kind == "package":
-            # Duplicate indices must be resolved explicitly in the file selector.
-            import re
+            from .firmware import automatic_configuration
 
-            raw_indices = [
-                re.search(r"(\d*)\.xml$", Path(p).name, re.I)[1] for p in data["raws"]
-            ]
-            chosen = data["raws"] if len(raw_indices) == len(set(raw_indices)) else []
+            # Legacy discover events are still supported by the internal protocol.
+            if "issues" not in data:
+                data = automatic_configuration(self._data["folder"])
+            issues = data["issues"]
             self.update(
+                folder=data["folder"],
                 loaders=data["loaders"],
-                loader=data["loaders"][0] if len(data["loaders"]) == 1 else "",
+                loader=data["loader"],
                 raws=data["raws"],
                 patches=data["patches"],
-                selectedRaws=chosen,
-                selectedPatches=data["patches"],
+                selectedRaws=data["selectedRaws"],
+                selectedPatches=data["selectedPatches"],
+                memory=data["memoryHint"],
+                memorySource="auto",
+                packageIssues=issues,
+                advanced=bool(issues),
+                packageStatus="attention" if issues else "checking",
+            )
+        elif kind == "import_progress":
+            self.update(
+                message="Extracting firmware ZIP…",
+                currentFile=f"{data['done'] // 1048576} / {data['total'] // 1048576} MB",
             )
         elif kind == "plan":
+            from .models import FlashPlan
+            from .package import layout_notes
+
+            notes = layout_notes(FlashPlan.from_dict(data))
             self.update(
+                layoutNotes=notes,
                 plan=data,
+                memory=data["memory"],
+                packageStatus="passed",
+                packageIssues=[],
                 capacities={},
-                warnings=[
-                    "Device model / firmware compatibility has not been established."
-                ],
+                warnings=notes
+                + ["Device model / firmware compatibility has not been established."],
             )
         elif kind == "preflight":
+            device = self.device()
+            self._inspected_device = device["id"] if device else None
             self.update(
+                deviceStatus="passed",
                 capacities={str(k): v for k, v in data["capacities"].items()},
                 warnings=data["warnings"] + [data["identity_match"]],
             )
@@ -444,31 +677,285 @@ class Controller(QObject):
                 "status": "failed",
                 "message": f"Worker exited abnormally ({code}); its success response was discarded.",
             }
+        cancelled_check = self._cancel_requested and self.action in CANCELLABLE_ACTIONS
+        if cancelled_check:
+            result = {
+                "status": "interrupted",
+                "message": "Checks stopped. Nothing was flashed.",
+            }
+        self.log(
+            f"\n[{time.strftime('%H:%M:%S')}] {result['status'].upper()} · {result['message']}\n"
+        )
+        for item in result.get("verified", []):
+            self.log(f"  PASS · {item}\n")
+        for item in result.get("unverified", []):
+            self.log(f"  NOT VERIFIED · {item}\n")
+        completed_action = self.action
         self.store.finish(self.task_dir, result)
         self.proc.deleteLater()
         self.proc = None
-        if self.action == "enter_edl":
+        if completed_action == "enter_edl":
             self.update(devices=[], deviceIndex=-1, capacities={})
         if result["status"] not in ("ready", "success") or self.action in (
             "flash",
             "reset",
+            "one_click",
         ):
             self.update(capacities={})
+        ui_state = result["status"]
+        if ui_state == "success" and completed_action not in (
+            "flash",
+            "one_click",
+            "reset",
+        ):
+            target = self.device()
+            ui_state = (
+                "ready"
+                if self._data["plan"]
+                and target
+                and target["mode"] == "adb"
+                and target["status"] == "device"
+                and target.get("usb_path")
+                else "idle"
+            )
         self.update(
             busy=False,
-            state=result["status"],
+            state=ui_state,
             message=result["message"],
             result=result,
             history=self.store.history(),
         )
+        if completed_action == "one_click":
+            if result["status"] != "success":
+                self.update(deviceStatus="attention", devices=[], deviceIndex=-1)
+            elif result.get("rebooted"):
+                self.update(devices=[], deviceIndex=-1, deviceStatus="waiting")
+        if cancelled_check:
+            self._auto_check = False
+            self._inspected_device = None
+            self.update(
+                plan={},
+                capacities={},
+                packageStatus="changed" if self._data["folder"] else "waiting",
+                deviceStatus="waiting",
+                packageIssues=[],
+                advanced=False,
+            )
+            self._cleanup_cancelled_import()
+            if self._quit_requested:
+                self.quitRequested.emit()
+            elif self._pending_source:
+                source, self._pending_source = self._pending_source, None
+                self.loadFolder(source)
+            return
+        if self._quit_requested:
+            self.quitRequested.emit()
+            return
+        if result["status"] in ("failed", "interrupted", "attention"):
+            self._auto_check = False
+            if completed_action in ("prepare", "validate"):
+                self.update(
+                    packageStatus="attention",
+                    advanced=True,
+                    packageIssues=self._data["packageIssues"] or [result["message"]],
+                )
+            elif completed_action in ("inspect", "scan"):
+                self.update(deviceStatus="attention")
+        elif completed_action == "enter_edl":
+            generation = self._generation
+            QTimer.singleShot(
+                1500,
+                lambda: self.refresh()
+                if generation == self._generation and self.editable()
+                else None,
+            )
+        elif self._auto_check:
+            self._continue_auto(completed_action)
+
+    def _continue_auto(self, action):
+        if not self._auto_check or self.proc or not self.editable():
+            return
+        if action in ("prepare", "validate") and self._data["plan"]:
+            self.update(deviceStatus="checking")
+            self.launch("scan", {})
+        elif action == "scan":
+            edl = [d for d in self._data["devices"] if d["mode"] == "edl"]
+            device = self.device()
+            if len(edl) > 1:
+                self._auto_check = False
+                self.update(
+                    deviceStatus="attention",
+                    message="Multiple EDL devices found. Connect only the device you want to flash.",
+                )
+            elif device and device["mode"] == "edl" and self._data["plan"]:
+                self.update(
+                    deviceStatus="checking",
+                    message="Checking device using the selected loader. Firmware will not be written.",
+                )
+                self.run("inspect")
+            elif self._data["warnings"] and not edl:
+                self._auto_check = False
+                self.update(
+                    deviceStatus="attention", message="\n".join(self._data["warnings"])
+                )
+            else:
+                self._auto_check = False
+                from .devices import connection_message
+
+                self.update(
+                    deviceStatus="waiting",
+                    message=connection_message(
+                        {"devices": self._data["devices"], "errors": []}
+                    ),
+                )
+        elif action == "inspect":
+            self._auto_check = False
+            self.update(
+                deviceStatus="passed",
+                message="File and device checks passed. Review the target and confirm flashing. Device-model compatibility is not established automatically.",
+            )
+
+    @Slot()
+    def check(self):
+        if not self.editable() or self._data["editorPath"]:
+            return
+        if not self._data["folder"]:
+            self.update(message="Choose firmware first.")
+            return
+        if (
+            not self._data["loader"]
+            or not self._data["selectedRaws"]
+            or not self._data["selectedPatches"]
+        ):
+            self.update(
+                advanced=True,
+                message="Complete the file choices in Advanced configuration first.",
+            )
+            return
+        self.validate()
+
+    @Slot()
+    def openFolder(self):
+        if self._data["folder"]:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._data["folder"]))
+
+    @Slot(str)
+    def editXml(self, path):
+        if not self.editable() or self._data["demo"]:
+            return
+        if path not in self._data["raws"] + self._data["patches"]:
+            return
+        from .xml_editor import read_xml
+
+        try:
+            text, self._editing_hash = read_xml(path)
+            self._auto_check = False
+            self.update(editorPath=path, editorText=text, editorError="")
+            self.editorRequested.emit()
+        except Exception as exc:
+            self.update(message=f"Cannot open XML: {exc}")
+
+    @Slot(str, result=bool)
+    def saveXml(self, text):
+        if not self.editable() or not self._data["editorPath"]:
+            return False
+        from .xml_editor import save_xml
+
+        try:
+            backup = save_xml(self._data["editorPath"], text, self._editing_hash)
+            self.update(editorPath="", editorText="", editorError="")
+            self.invalidate()
+            self.log(f"XML saved. Original backed up to {backup}\n")
+            self.check()
+            return True
+        except Exception as exc:
+            self.update(editorError=str(exc))
+            return False
+
+    @Slot()
+    def cancelEdit(self):
+        self.update(editorPath="", editorText="", editorError="")
+
+    @Slot()
+    def clearPackage(self):
+        if not self._data["canChoosePackage"]:
+            return
+        self._pending_source = None
+        if self.proc:
+            self.stop()
+        if not self.proc:
+            self.invalidate()
+        else:
+            self.update(plan={}, capacities={}, result={})
+        self.update(
+            folder="",
+            packageSource="",
+            loaders=[],
+            loader="",
+            raws=[],
+            patches=[],
+            selectedRaws=[],
+            selectedPatches=[],
+            packageStatus="waiting",
+            currentFile="",
+            message="Choose a firmware folder to begin.",
+        )
+
+    @Slot()
+    def quitAfterStop(self):
+        self._quit_requested = True
+        self.update()
+        self._pending_source = None
+        if self.proc:
+            self.stop()
+        else:
+            self.quitRequested.emit()
+
+    def _cleanup_cancelled_import(self):
+        if self.action != "prepare" or not self._import_workspace:
+            return
+        from .runtime import data_dir
+        import shutil
+        import threading
+
+        path = Path(self._import_workspace)
+        # Only delete this worker's own newly created ZIP working copy.
+        if path.parent.resolve() == (
+            data_dir() / "packages"
+        ).resolve() and path.name.startswith("firmware-"):
+            threading.Thread(
+                target=lambda: shutil.rmtree(path, ignore_errors=True), daemon=True
+            ).start()
+        self._import_workspace = None
 
     @Slot()
     def stop(self):
-        if self.proc and self._data["state"] != "stopping":
-            self.proc.write(b'{"version":1,"action":"stop"}\n')
+        if not self.proc or self._data["state"] == "stopping":
+            return
+        self._auto_check = False
+        self._generation += 1
+        self._cancel_requested = True
+        proc = self.proc
+        proc.write(b'{"version":1,"action":"stop"}\n')
+        if self.action in CANCELLABLE_ACTIONS:
+            self._inspected_device = None
             self.update(
                 state="stopping",
-                message="Stop requested. Waiting for the current operation boundary…",
+                capacities={},
+                message="Cancelling checks… You can choose another package or close the window.",
+            )
+            # Cooperative cleanup gets a short grace period. A stuck filesystem
+            # call must never keep the UI locked waiting for the worker.
+            QTimer.singleShot(
+                300,
+                lambda: proc.kill()
+                if self.proc is proc and self._cancel_requested
+                else None,
+            )
+        else:
+            self.update(
+                state="stopping",
+                message="Stop requested. Waiting for the current device operation boundary…",
             )
 
     def tick(self):
@@ -482,12 +969,17 @@ class Controller(QObject):
             if phase == "connecting"
             else (
                 600
-                if self.action in ("discover", "validate") or phase == "checking"
+                if self.action in ("prepare", "discover", "validate")
+                or phase == "checking"
                 else 120
             )
         )
+        if phase == "waiting_edl":
+            limit = 75
         elapsed = (
-            now - self.phase_started if phase == "connecting" else now - self.activity
+            now - self.phase_started
+            if phase in ("connecting", "waiting_edl")
+            else now - self.activity
         )
         if elapsed > limit:
             self.result = {
@@ -518,6 +1010,7 @@ class Controller(QObject):
 
     def demo(self):
         self.update(
+            packageStatus="passed",
             folder="/Firmware/Qualcomm Reference Package",
             loader="/Firmware/Qualcomm Reference Package/prog_firehose_ddr.elf",
             loaders=["/Firmware/Qualcomm Reference Package/prog_firehose_ddr.elf"],

@@ -29,8 +29,6 @@ class Store:
         try:
             loaded = json.loads((self.root / "settings.json").read_text())
             if isinstance(loaded, dict):
-                if loaded.get("language") in ("en", "zh"):
-                    self.settings["language"] = loaded["language"]
                 if loaded.get("theme") in ("system", "light", "dark"):
                     self.settings["theme"] = loaded["theme"]
                 if type(loaded.get("reboot")) is bool:

@@ -93,6 +93,7 @@ def scan():
                         details.get("model", "Android device").replace("_", " "),
                         status,
                         serial,
+                        usb_path=details.get("usb", ""),
                     )
                 )
         except Exception as exc:
@@ -120,6 +121,7 @@ def scan():
                     serial,
                     dev.bus or 0,
                     dev.address or 0,
+                    usb_path=usb_location(dev),
                 )
             )
     except Exception as exc:
@@ -138,3 +140,31 @@ def enter_edl(device):
     )
     if result.returncode:
         raise ValidationError(result.stderr.strip() or "Device rejected reboot edl")
+
+
+def usb_location(device):
+    """Stable physical topology; USB device address deliberately excluded."""
+    ports = tuple(device.port_numbers or ())
+    return f"{device.bus}-" + ".".join(str(p) for p in ports) if ports else ""
+
+
+def connection_message(report):
+    devices = report["devices"]
+    if not devices:
+        return (
+            "No device connected. Connect a USB cable and enable USB debugging, then Refresh."
+            if not report["errors"]
+            else "Device detection failed: " + "\n".join(report["errors"])
+        )
+    if len(devices) > 1:
+        return "Multiple devices detected. Select the intended target before starting."
+    device = devices[0]
+    if device["mode"] == "edl":
+        return "EDL device detected. Choose firmware to check and flash."
+    if device["status"] == "unauthorized":
+        return "ADB authorization required. Unlock the device and accept the USB debugging prompt, then Refresh."
+    if device["status"] == "offline":
+        return "ADB device is offline. Reconnect the USB cable and Refresh."
+    if device["status"] != "device":
+        return f"ADB device is not ready: {device['status']}"
+    return f"Connected: {device['name']} ({device['serial']}). One-click flash will enter EDL automatically after confirmation."

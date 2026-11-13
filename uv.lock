@@ -350,7 +350,7 @@ wheels = [
 
 [[package]]
 name = "qualcomm-flash-tool"
-version = "2.0.0"
+version = "2.3.2"
 source = { editable = "." }
 dependencies = [
     { name = "colorama" },

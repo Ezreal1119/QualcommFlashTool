@@ -15,8 +15,9 @@ fi
 if [[ -n "${QFT_SIGN_IDENTITY:-}" ]]; then
   scripts/sign.sh "dist/QualcommFlashTool.app"
 fi
+.app-venv/bin/python -c 'import shutil; shutil.rmtree("build/dmg-root", ignore_errors=True)'
 mkdir -p build/dmg-root
 ditto dist/QualcommFlashTool.app build/dmg-root/QualcommFlashTool.app
 [[ -L build/dmg-root/Applications ]] || ln -s /Applications build/dmg-root/Applications
-hdiutil create -volname 'Qualcomm Flash Tool' -srcfolder build/dmg-root -ov -format UDZO dist/QualcommFlashTool-2.0.0-arm64.dmg
-shasum -a 256 dist/QualcommFlashTool-2.0.0-arm64.dmg > dist/QualcommFlashTool-2.0.0-arm64.dmg.sha256
+hdiutil create -volname 'Qualcomm Flash Tool' -srcfolder build/dmg-root -ov -format UDZO dist/QualcommFlashTool-2.3.2-arm64.dmg
+shasum -a 256 dist/QualcommFlashTool-2.3.2-arm64.dmg > dist/QualcommFlashTool-2.3.2-arm64.dmg.sha256
