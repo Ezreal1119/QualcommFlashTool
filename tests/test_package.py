@@ -5,6 +5,7 @@ import pytest
 from qft.expressions import evaluate, ValidationError
 from qft.package import make_plan, recheck, validate_ranges, discover
 from qft.images import image_info, image_range
+from loader_factory import build_loader
 
 
 @pytest.mark.parametrize(
@@ -89,7 +90,7 @@ def test_ambiguous_variants(package):
 def test_external_loader_keeps_full_path(package, tmp_path):
     other = tmp_path / "external"
     other.mkdir()
-    (other / "prog_firehose.mbn").write_bytes(b"different loader")
+    (other / "prog_firehose.mbn").write_bytes(build_loader(text=b"different loader"))
     p = make_plan(
         package,
         other / "prog_firehose.mbn",

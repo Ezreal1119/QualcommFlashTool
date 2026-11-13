@@ -40,10 +40,29 @@ def test_ufs_memory_hint(package):
     assert automatic_configuration(package)["memoryHint"] == "ufs"
 
 
-def test_duplicate_loaders_need_review(package):
+def test_invalid_binary_is_excluded_with_reason(package):
     (package / "prog_other.elf").write_bytes(b"other")
     config = automatic_configuration(package)
-    assert config["issues"] and not config["loader"]
+    assert not config["issues"] and config["loader"].endswith("prog_firehose.mbn")
+    assert any(r["status"] == "excluded" for r in config["loaderReports"])
+
+
+def test_ui_recheck_preserves_auto_pool_and_manual_selection_narrows_it(
+    app, package, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("QFT_DATA_DIR", str(tmp_path / "appdata"))
+    c = Controller(demo=True)
+    launches = []
+    monkeypatch.setattr(
+        c, "launch", lambda action, payload: launches.append((action, payload))
+    )
+    c.handle("package", automatic_configuration(package))
+    c.validate()
+    assert launches[-1][1]["loader_candidates"] == [str(package / "prog_firehose.mbn")]
+    c.selectLoader(str(package / "prog_firehose.mbn"))
+    c.validate()
+    assert launches[-1][1]["loader_candidates"] == []
+    c.timer.stop()
 
 
 def test_duplicate_raw_variants_are_never_guessed(package):

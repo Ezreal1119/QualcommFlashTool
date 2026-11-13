@@ -81,6 +81,7 @@ class Controller(QObject):
             "folder": "",
             "loaders": [],
             "loader": "",
+            "loaderCandidates": [],
             "raws": [],
             "patches": [],
             "selectedRaws": [],
@@ -231,7 +232,7 @@ class Controller(QObject):
     def selectLoader(self, path):
         if self.editable():
             self.invalidate()
-            self.update(loader=path)
+            self.update(loader=path, loaderCandidates=[])
 
     @Slot(str, str, bool)
     def toggleFile(self, kind, path, selected):
@@ -314,6 +315,7 @@ class Controller(QObject):
             folder=folder if Path(folder).is_dir() else "",
             loaders=[],
             loader="",
+            loaderCandidates=[],
             raws=[],
             patches=[],
             selectedRaws=[],
@@ -341,7 +343,7 @@ class Controller(QObject):
                 if path not in values:
                     values.append(path)
                 self.invalidate()
-                self.update(loaders=values, loader=path)
+                self.update(loaders=values, loader=path, loaderCandidates=[])
         else:
             paths, _ = QFileDialog.getOpenFileNames(
                 None, "Choose XML files", self._data["folder"], "XML (*.xml)"
@@ -383,15 +385,18 @@ class Controller(QObject):
         self.launch(
             "validate",
             {
-                k: self._data[v]
-                for k, v in [
-                    ("folder", "folder"),
-                    ("loader", "loader"),
-                    ("memory", "memory"),
-                    ("memory_source", "memorySource"),
-                    ("raws", "selectedRaws"),
-                    ("patches", "selectedPatches"),
-                ]
+                "loader_candidates": self._data["loaderCandidates"],
+                **{
+                    k: self._data[v]
+                    for k, v in [
+                        ("folder", "folder"),
+                        ("loader", "loader"),
+                        ("memory", "memory"),
+                        ("memory_source", "memorySource"),
+                        ("raws", "selectedRaws"),
+                        ("patches", "selectedPatches"),
+                    ]
+                },
             },
         )
 
@@ -571,6 +576,15 @@ class Controller(QObject):
             )
         elif kind == "log":
             self.log(data.get("text", ""))
+        elif kind == "loader_selection":
+            for candidate in data["candidates"]:
+                self.log(
+                    f"LOADER · {Path(candidate['path']).name}: {candidate['status']} · {candidate['reason']}\n"
+                )
+            if self.task_dir:
+                atomic_json(self.task_dir / "loader_selection.json", data)
+            if data.get("selected"):
+                self.update(loader=data["selected"])
         elif kind == "device_bound":
             device = data["device"]
             self._inspected_device = None
@@ -613,6 +627,7 @@ class Controller(QObject):
                 folder=data["folder"],
                 loaders=data["loaders"],
                 loader=data["loader"],
+                loaderCandidates=data.get("loaderCandidates", []),
                 raws=data["raws"],
                 patches=data["patches"],
                 selectedRaws=data["selectedRaws"],
@@ -892,6 +907,7 @@ class Controller(QObject):
             packageSource="",
             loaders=[],
             loader="",
+            loaderCandidates=[],
             raws=[],
             patches=[],
             selectedRaws=[],

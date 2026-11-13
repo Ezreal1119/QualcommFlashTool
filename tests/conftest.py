@@ -6,13 +6,14 @@ import uuid
 import zlib
 import pytest
 from qft.package import make_plan
+from loader_factory import build_loader
 
 
 @pytest.fixture
 def package(tmp_path):
     folder = tmp_path / "固件 with spaces"
     folder.mkdir()
-    (folder / "prog_firehose.mbn").write_bytes(b"loader")
+    (folder / "prog_firehose.mbn").write_bytes(build_loader())
     (folder / "boot.img").write_bytes(b"B" * 512)
     (folder / "rawprogram0.xml").write_text(
         '<data><program SECTOR_SIZE_IN_BYTES="512" file_sector_offset="0" filename="boot.img" label="boot" num_partition_sectors="1" physical_partition_number="0" start_sector="10" /></data>'

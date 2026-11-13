@@ -87,6 +87,7 @@ def main():
                         config["selectedRaws"],
                         config["selectedPatches"],
                         stopped=stopped.is_set,
+                        loader_candidates=config["loaderCandidates"],
                     )
                     emit("plan", asdict(plan))
                     result = {
@@ -127,6 +128,7 @@ def main():
                     request["raws"],
                     request["patches"],
                     stopped=stopped.is_set,
+                    loader_candidates=request.get("loader_candidates", ()),
                 )
                 emit("plan", asdict(plan))
                 result = {

@@ -13,6 +13,7 @@ from defusedxml import ElementTree as ET
 
 from .expressions import ValidationError
 from .package import discover
+from .loaders import inspect_loader
 from .runtime import data_dir
 
 MAX_EXPANDED = 128 * 1024**3
@@ -123,11 +124,37 @@ def automatic_configuration(folder, *, stopped=lambda: False, progress=None):
         issues.append(
             "Missing or ambiguous patch pairs. Review XML selections in Advanced configuration."
         )
-    if len(loaders) != 1:
+    verified, loader_reports = [], []
+    if len(loaders) > 128:
+        raise ValidationError(
+            "Too many ELF/MBN files. Select the extracted firmware subfolder, or configure one loader manually."
+        )
+    for path in loaders:
+        if stopped():
+            raise ValidationError("File check cancelled.")
+        try:
+            info = inspect_loader(path)
+            verified.append(path)
+            loader_reports.append(
+                {
+                    "path": path,
+                    "sha256": info.sha256,
+                    "status": "integrity_verified",
+                    "message": "Hardware match pending Sahara identification",
+                }
+            )
+        except (ValidationError, OSError) as exc:
+            loader_reports.append(
+                {"path": path, "status": "excluded", "message": str(exc)}
+            )
+        if progress:
+            progress({"entries": len(loader_reports), "path": path})
+    if not verified:
         issues.append(
-            "Choose a Firehose loader in Advanced configuration."
-            if loaders
-            else "No Firehose loader found. Add an ELF / MBN loader in Advanced configuration."
+            "No supported, signed device programmer found. "
+            + "; ".join(
+                f"{Path(r['path']).name}: {r['message']}" for r in loader_reports
+            )
         )
     try:
         memory = infer_memory(raws)
@@ -143,7 +170,10 @@ def automatic_configuration(folder, *, stopped=lambda: False, progress=None):
         "folder": str(Path(folder).resolve()),
         "issues": issues,
         "memoryHint": memory,
-        "loader": loaders[0] if len(loaders) == 1 else "",
+        # This is provisional; only Sahara identity matching authorizes upload.
+        "loader": verified[0] if verified else "",
+        "loaderCandidates": verified,
+        "loaderReports": loader_reports,
         "selectedRaws": raws if len(set(raw_indices)) == len(raw_indices) else [],
         "selectedPatches": patches
         if len(set(patch_indices)) == len(patch_indices)

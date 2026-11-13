@@ -16,11 +16,11 @@ First use installs Python dependencies through uv. Missing project ADB/libusb ar
 
 ## Confirm and execute
 
-1. Offline folder checks find one unambiguous loader/XML set and validate the images. Missing/ambiguous files are errors; no rows are silently skipped.
+1. Offline folder checks find signed programmer candidates, one unambiguous XML set and validate the images. Missing/ambiguous XML files are errors; no write rows are silently skipped. Filenames do not establish loader compatibility.
 2. A read-only scan requires exactly one available EDL or authorized wired ADB device. Missing, offline, unauthorized, multiple or unidentifiable devices fail before confirmation.
 3. The review shows the full firmware/loader paths, device identity and USB port, storage hint, operation counts, XML list and layout notes. A local `plan.json` contains every file hash and sector range. Package checks do not establish model compatibility; confirm the package is intended for the target. Device storage is checked after confirmation.
 4. Type exactly `FLASH` to authorize EDL transition, flashing, default verification and reboot. Anything else, including EOF, cancels. There is no `--yes` bypass.
-5. The existing worker rechecks all fingerprints and current device identity before mode changes, binds ADB-to-EDL through the same USB path, checks actual capacities before writing, then runs programs, patches and verification. Required failures stop subsequent commands. There is no automatic retry, resume or reset after failure. Reboot follows verified success; unavailable verification prevents automatic reboot and returns a nonzero code.
+5. The worker rechecks all fingerprints and current device identity before mode changes, binds ADB-to-EDL through the same USB path, matches a unique programmer against Sahara identity before upload, checks actual capacities before writing, then runs programs, patches and verification. Required failures stop subsequent commands. There is no automatic retry, resume or reset after failure. Reboot follows verified success; unavailable verification prevents automatic reboot and returns a nonzero code. [Loader rules and supported layouts](loader-matching.md).
 
 Default output shows stages, current file and byte progress. Raw logs, JSON Lines events, requests, plans and results are saved under `~/Library/Application Support/QualcommFlashTool/tasks/` and appear in desktop History the next time it opens. Nothing is uploaded.
 

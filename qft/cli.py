@@ -98,6 +98,13 @@ class Console:
             )
         elif kind == "preflight":
             self.line("Device capacity and write-range checks passed.")
+        elif kind == "loader_selection":
+            if data.get("selected"):
+                self.line("Verified loader: " + text(data["selected"]))
+            for candidate in data["candidates"]:
+                self.line(
+                    f"  {text(Path(candidate['path']).name)}: {text(candidate['status'])} — {text(candidate['reason'])}"
+                )
 
 
 class SessionLock:
@@ -333,9 +340,15 @@ class WorkerRunner:
                                 "environment",
                                 "preflight",
                                 "device_bound",
+                                "loader_selection",
                             ):
                                 metadata[kind] = data
-                                if kind in ("plan", "preflight", "device_bound"):
+                                if kind in (
+                                    "plan",
+                                    "preflight",
+                                    "device_bound",
+                                    "loader_selection",
+                                ):
                                     atomic_json(folder / (kind + ".json"), data)
                             if kind == "log":
                                 raw.write(data.get("text", "").encode())
@@ -483,7 +496,12 @@ def show_summary(console, plan, device, plan_file):
     )
     console.line(f"  USB     : {text(device.usb_path or device.id)}")
     console.line(f"  Folder  : {text(plan.folder)}")
-    console.line(f"  Loader  : {text(plan.loader)}")
+    paths = plan.loader_candidates or (plan.loader,)
+    console.line(
+        f"  Loader  : {len(paths)} signed candidate(s); hardware match follows confirmation"
+    )
+    for path in paths:
+        console.line(f"            {text(path)}")
     console.line(
         f"  Storage : {plan.memory.upper()} (package hint; device checks follow confirmation)"
     )

@@ -41,4 +41,4 @@ UV_PROJECT_ENVIRONMENT=.app-venv uv sync --frozen --extra dev --python 3.11.13 -
 
 - Commit/push the source before pulling it on another Mac. `dist/` and `build/` are ignored by Git; share the built DMG separately.
 - Current builds are internally signed and **not Apple-notarized**.
-- [Detailed guide](docs/guide.md) · [DT50 hardware test](docs/hardware/DT50-2026-11-12.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
+- [Detailed guide](docs/guide.md) · [Loader matching](docs/loader-matching.md) · [DT50 hardware test](docs/hardware/DT50-2026-11-12.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)

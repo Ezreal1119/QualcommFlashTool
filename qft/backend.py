@@ -8,11 +8,16 @@ import json
 import logging
 import re
 import time
+import hashlib
+import tempfile
+from pathlib import Path
 from xml.sax.saxutils import quoteattr
 from .runtime import setup_vendor
 from .expressions import ValidationError
 from .devices import scan
 from .transport import CheckedUSB
+from .loaders import DeviceIdentity, MAX_SIZE, select_loader
+from . import loader_session
 
 
 class EDLBackend:
@@ -24,6 +29,7 @@ class EDLBackend:
         self.fh = None
         self.capacities = {}
         self.supports_digest = False
+        self.loader_info = None
 
     def activity(self):
         self.emit("activity", {})
@@ -61,10 +67,13 @@ class EDLBackend:
         self.cdc.write = transport.write
         self.cdc.read = transport.read
         sah = sahara(self.cdc, logging.INFO)
+        token = loader_session.usb_session(self.device)
+        # A nonempty programmer disables upstream filename/prefix-based search.
         sah.programmer = self.plan.loader
         info = sah.connect()
         mode = info.get("mode", "error")
         if mode == "sahara":
+            loader_session.forget()
             hello = info.get("data")
             version = getattr(hello, "version", 2)
             if getattr(hello, "mode", None) == sahara_mode_t.SAHARA_MODE_MEMORY_DEBUG:
@@ -75,10 +84,34 @@ class EDLBackend:
                 version=version
             ):
                 raise ValidationError("Sahara handshake failed. No reset was sent.")
+            identity = DeviceIdentity(sah.hwid, sah.pkhash or "", sah.serial)
+            self.loader_info = select_loader(self.plan, identity, self.emit)
             info = sah.connect()
             mode = info.get("mode", "error")
             if mode == "sahara":
-                mode = sah.upload_loader(version=version)
+                # Upload an immutable snapshot of exactly the inspected bytes.
+                # Edits between inspection and transfer never change that upload.
+                with Path(self.loader_info.path).open("rb") as source:
+                    image = source.read(MAX_SIZE + 1)
+                if hashlib.sha256(image).hexdigest() != self.loader_info.sha256:
+                    raise ValidationError(
+                        "Loader changed before upload. Check the package again."
+                    )
+                with tempfile.TemporaryDirectory(prefix="qft-loader-") as workspace:
+                    snapshot = Path(workspace) / Path(self.loader_info.path).name
+                    snapshot.write_bytes(image)
+                    sah.programmer = str(snapshot)
+                    mode = sah.upload_loader(version=version)
+            else:
+                raise ValidationError(
+                    "Sahara mode changed before the verified loader upload"
+                )
+        elif mode == "firehose":
+            identity, self.loader_info = loader_session.resume(
+                token, self.plan, self.emit
+            )
+            sah.serial = identity.serial
+            sah.bit64 = self.loader_info.bits == 64
         if mode != "firehose":
             raise ValidationError(
                 f"Loader did not enter Firehose ({mode}). Check loader compatibility or device authorization."
@@ -86,7 +119,7 @@ class EDLBackend:
         cfg = firehose.cfg()
         cfg.MemoryName = self.plan.memory
         cfg.SECTOR_SIZE_IN_BYTES = self.plan.programs[0].sector_size
-        cfg.programmer = self.plan.loader
+        cfg.programmer = self.loader_info.path
         cfg.bit64 = sah.bit64
         self.fh = firehose(
             self.cdc,
@@ -160,6 +193,9 @@ class EDLBackend:
             if reported_memory != self.plan.memory:
                 raise ValidationError(f"LUN {lun} reported a conflicting memory type")
             self.capacities[lun] = self.geometry(fields, lun, cfg.SECTOR_SIZE_IN_BYTES)
+        # Never carry evidence across a USB reconnect during initialization.
+        if token is not None and loader_session.usb_session(self.device) == token:
+            loader_session.remember(token, identity, self.loader_info)
         return self.capacities
 
     def _drain_greeting(self):
@@ -393,6 +429,7 @@ class EDLBackend:
         )
 
     def reset(self):
+        loader_session.forget()
         rsp = self.fh.xmlsend(self.xml("power", {"value": "reset"}))
         self.require(rsp, "reset")
         for line in rsp.log or []:

@@ -96,14 +96,7 @@ def discover(
         if re.fullmatch(r"rawprogram(?:_unsparse)?\d*\.xml", p.name, re.I)
     ]
     patches = [p for p in files if re.fullmatch(r"patch\d*\.xml", p.name, re.I)]
-    loaders = [
-        p
-        for p in files
-        if p.suffix.lower() in (".elf", ".mbn")
-        and ("firehose" in p.name.lower() or "prog" in p.name.lower())
-    ]
-    if not loaders:
-        loaders = [p for p in files if p.suffix.lower() in (".elf", ".mbn")]
+    loaders = [p for p in files if p.suffix.lower() in (".elf", ".mbn")]
 
     def key(p):
         n = re.search(r"(\d+)\.xml$", p.name, re.I)
@@ -141,13 +134,31 @@ def _xml(path, tag):
         yield elem
 
 
-def make_plan(folder, loader, memory, raws, patches, *, stopped=lambda: False):
+def make_plan(
+    folder,
+    loader,
+    memory,
+    raws,
+    patches,
+    *,
+    stopped=lambda: False,
+    loader_candidates=(),
+):
     if memory not in ("ufs", "emmc"):
         raise ValidationError("Select UFS or eMMC")
     root = Path(folder).resolve(strict=True)
     loader = Path(loader).resolve(strict=True)
     if loader.suffix.lower() not in (".elf", ".mbn"):
         raise ValidationError("Select an ELF or MBN loader")
+    candidates = tuple(str(Path(p).resolve(strict=True)) for p in loader_candidates)
+    if candidates and str(loader) not in candidates:
+        raise ValidationError("Provisional loader is outside the candidate set")
+    from .loaders import inspect_loader
+
+    for path in candidates or (str(loader),):
+        if stopped():
+            raise ValidationError("File check cancelled.")
+        inspect_loader(path)
     if not raws or not patches:
         raise ValidationError("Both rawprogram and patch XML files are required")
     if len(raws) != len(patches):
@@ -169,6 +180,7 @@ def make_plan(folder, loader, memory, raws, patches, *, stopped=lambda: False):
     file_patches = []
     used = {
         str(loader),
+        *candidates,
         *[str(Path(p).resolve(strict=True)) for p in [*raws, *patches]],
     }
     for xml in raws:
@@ -326,6 +338,7 @@ def make_plan(folder, loader, memory, raws, patches, *, stopped=lambda: False):
         tuple(str(Path(p).resolve()) for p in raws),
         tuple(str(Path(p).resolve()) for p in patches),
         tuple(file_patches),
+        candidates,
     )
 
 

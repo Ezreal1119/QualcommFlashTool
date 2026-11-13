@@ -64,6 +64,7 @@ class FlashPlan:
     raw_files: tuple[str, ...]
     patch_files: tuple[str, ...]
     file_patches: tuple[Patch, ...] = ()
+    loader_candidates: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, d):
@@ -73,6 +74,7 @@ class FlashPlan:
                 "programs": tuple(Program(**p) for p in d["programs"]),
                 "patches": tuple(Patch(**p) for p in d["patches"]),
                 "file_patches": tuple(Patch(**p) for p in d.get("file_patches", [])),
+                "loader_candidates": tuple(d.get("loader_candidates", ())),
                 "files": tuple(FileStamp(**p) for p in d["files"]),
                 "raw_files": tuple(d["raw_files"]),
                 "patch_files": tuple(d["patch_files"]),

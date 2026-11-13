@@ -7,6 +7,7 @@ import uuid
 import zlib
 
 import pytest
+from loader_factory import build_loader
 from xml.etree import ElementTree as ET
 from qft.engine import execute
 from qft.expressions import ValidationError
@@ -50,7 +51,7 @@ def build_plan(folder):
 def layout(tmp_path):
     folder = tmp_path / "Firmware"
     folder.mkdir()
-    (folder / "prog_firehose_qcm4290_ddr.elf").write_bytes(b"test loader")
+    (folder / "prog_firehose_qcm4290_ddr.elf").write_bytes(build_loader())
     (folder / "vbmeta_system.img").write_bytes(b"V" * SS)
     (folder / "zeros.bin").write_bytes(bytes(16896))
     root = ET.Element("data")
